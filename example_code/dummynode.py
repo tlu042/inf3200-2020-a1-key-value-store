@@ -6,12 +6,17 @@ import signal
 import socket
 import socketserver
 import threading
+import http.client
+from hashlib import sha1
 
-from http.server import BaseHTTPRequestHandler,HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
 object_store = {}
 neighbors = []
+successor = ("", "")
+predecessor = ("", "")
+
 
 class NodeHttpHandler(BaseHTTPRequestHandler):
 
@@ -34,7 +39,7 @@ class NodeHttpHandler(BaseHTTPRequestHandler):
 
         self.send_response(code)
         self.send_header('Content-type', content_type)
-        self.send_header('Content-length',len(content))
+        self.send_header('Content-length', len(content))
         self.end_headers()
         self.wfile.write(content)
 
@@ -59,8 +64,7 @@ class NodeHttpHandler(BaseHTTPRequestHandler):
             if key in object_store:
                 self.send_whole_response(200, object_store[key])
             else:
-                self.send_whole_response(404,
-                        "No object with key '%s' on this node" % key)
+                self.send_whole_response(200, self.ask_neighbor(key))
 
         elif self.path.startswith("/neighbors"):
             self.send_whole_response(200, neighbors)
@@ -68,36 +72,80 @@ class NodeHttpHandler(BaseHTTPRequestHandler):
         else:
             self.send_whole_response(404, "Unknown path: " + self.path)
 
+    def ask_neighbor(self, key):
+        neighbor = self.server.get_neighbor(key)
+        conn = http.client.HTTPConnection(neighbor)
+        conn.request("GET", "/storage/" + key)
+        resp = conn.getresponse()
+        headers = resp.getheaders()
+        if resp.status != 200:
+            value = None
+        else:
+            value = resp.read()
+        contenttype = "text/plain"
+        for h, hv in headers:
+            if h == "Content-type":
+                contenttype = hv
+        if contenttype == "text/plain":
+            value = value.decode("utf-8")
+        conn.close()
+
+        return value
+
+
+class ThreadingHttpServer(HTTPServer, socketserver.ThreadingMixIn):
+    def __init__(self, *kwargs):
+        super().__init__(*kwargs)
+        self.key_hash = self.hash_value(str(self.server_port))
+        self.set_pre_successor(self.key_hash)
+        print(f"[ {self.server_port} ] Hash: {self.key_hash}")
+        print(
+            f"[ {self.server_port} ] Successor: {self.successor} | Predecessor: {self.predecessor}")
+
+    def set_pre_successor(self, my_key):
+        self.successor = (self.hash_value(
+            neighbors[0].split(":")[1]), neighbors[0])
+        self.predecessor = (self.hash_value(
+            neighbors[1].split(":")[1]), neighbors[1])
+
+    def hash_value(self, string):
+        m = sha1()
+        m.update(string.encode())
+        return m.hexdigest()
+
+    def get_neighbor(self, key):
+        return self.successor[1]
+
+
 def arg_parser():
     PORT_DEFAULT = 8000
     DIE_AFTER_SECONDS_DEFAULT = 20 * 60
     parser = argparse.ArgumentParser(prog="node", description="DHT Node")
 
     parser.add_argument("-p", "--port", type=int, default=PORT_DEFAULT,
-            help="port number to listen on, default %d" % PORT_DEFAULT)
+                        help="port number to listen on, default %d" % PORT_DEFAULT)
 
     parser.add_argument("--die-after-seconds", type=float,
-            default=DIE_AFTER_SECONDS_DEFAULT,
-            help="kill server after so many seconds have elapsed, " +
-                "in case we forget or fail to kill it, " +
-                "default %d (%d minutes)" % (DIE_AFTER_SECONDS_DEFAULT, DIE_AFTER_SECONDS_DEFAULT/60))
+                        default=DIE_AFTER_SECONDS_DEFAULT,
+                        help="kill server after so many seconds have elapsed, " +
+                        "in case we forget or fail to kill it, " +
+                        "default %d (%d minutes)" % (DIE_AFTER_SECONDS_DEFAULT, DIE_AFTER_SECONDS_DEFAULT/60))
 
     parser.add_argument("neighbors", type=str, nargs="*",
-            help="addresses (host:port) of neighbour nodes")
+                        help="addresses (host:port) of neighbour nodes")
 
     return parser
 
-class ThreadingHttpServer(HTTPServer, socketserver.ThreadingMixIn):
-    pass
 
 def run_server(args):
     global server
     global neighbors
-    server = ThreadingHttpServer(('', args.port), NodeHttpHandler)
     neighbors = args.neighbors
+    server = ThreadingHttpServer(('', args.port), NodeHttpHandler)
 
     def server_main():
-        print("Starting server on port {}. Neighbors: {}".format(args.port, args.neighbors))
+        print("Starting server on port {}. Neighbors: {}".format(
+            args.port, args.neighbors))
         server.serve_forever()
         print("Server has shut down")
 
@@ -126,10 +174,12 @@ def run_server(args):
     # able to kill it with kill -9.
     thread.join(args.die_after_seconds)
     if thread.is_alive():
-        print("Reached %.3f second timeout. Asking server to shut down" % args.die_after_seconds)
+        print("Reached %.3f second timeout. Asking server to shut down" %
+              args.die_after_seconds)
         server.shutdown()
 
     print("Exited cleanly")
+
 
 if __name__ == "__main__":
 

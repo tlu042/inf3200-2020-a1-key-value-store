@@ -29,9 +29,9 @@ neighbours to report.
 
 Example:
 
-    python3 node.py -p 8000 localhost:8001 localhost:8002 &
-    python3 node.py -p 8001 localhost:8000 localhost:8002 &
-    python3 node.py -p 8002 localhost:8000 localhost:8001 &
+    python3 dummynode.py -p 8000 localhost:8001 localhost:8002 &
+    python3 dummynode.py -p 8001 localhost:8000 localhost:8002 &
+    python3 dummynode.py -p 8002 localhost:8000 localhost:8001 &
 
     python3 client.py localhost:8000
 
