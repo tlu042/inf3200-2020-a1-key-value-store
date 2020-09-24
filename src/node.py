@@ -9,8 +9,6 @@ import http.client
 from hashlib import sha1
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-object_store = {}
-
 
 class NodeHttpHandler(BaseHTTPRequestHandler):
     def send_whole_response(self, code, content, content_type="text/plain"):
@@ -44,41 +42,43 @@ class NodeHttpHandler(BaseHTTPRequestHandler):
         value = self.rfile.read(content_length)
 
         if self.path.startswith("/storage"):
-
             key = self.extract_key_from_path(self.path)
-
-            object_store[key] = value
-
-            # Send OK response
-            self.send_whole_response(200, "Value stored for " + key)
+            status = self.server.locate_storage(key, 1, value)
+            print(status)
+            if status == 200:
+                msg = f"Value stored for {key}"
+            else:
+                msg = f"Failed to store value for {key}"
+            self.send_whole_response(status, msg)
 
         elif self.path.startswith("/join"):
             status, neighbors = self.server.find_neighbors(value)
             self.send_whole_response(status, neighbors)
 
         elif self.path.startswith("/update"):
-            status = self.server.update_neighbors(value)
-            self.send_whole_response(status, None)
+            neighbors = json.loads(value.decode())
+            status = self.server.update_n(neighbors)
+
+            # status = self.server.update_neighbors(value)
+            # self.send_whole_response(200, "Updated")
 
     def do_GET(self):
         if self.path.startswith("/storage"):
             key = self.extract_key_from_path(self.path)
 
-            if key in object_store:
-                self.send_whole_response(200, object_store[key])
-            else:
-                self.send_whole_response(200, self.ask_neighbor(key))
+            status, value = self.server.locate_storage(key, 0)
+            self.send_whole_response(status, value)
 
         elif self.path.startswith("/neighbors"):
             self.send_whole_response(
-                200, {"successor": self.server.successor, "predecessor": self.server.predecessor})
+                200, (self.server.successor[1], self.server.predecessor[1]))
 
         else:
             self.send_whole_response(404, "Unknown path: " + self.path)
 
     def ask_neighbor(self, key):
         neighbor = self.server.successor[1]
-        print(neighbor)
+        # print(neighbor)
         conn = http.client.HTTPConnection(self.server.successor[1].decode())
         conn.request("GET", "/storage/" + key)
         resp = conn.getresponse()
@@ -103,35 +103,136 @@ class ThreadingHttpServer(HTTPServer, socketserver.ThreadingMixIn):
         super().__init__(*args)
         self.address = f"{self.server_address[0]}:{self.server_address[1]}"
         self.key = self.hash_value(self.address.encode())
+        self.object_store = {}
         self.successor = None
         self.predecessor = None
         if entry_node:
             self.join_ring(entry_node)
-        print(
-            f"{self.address} got successor {self.successor} and predecessor {self.predecessor} and own key {self.key}")
+        # print(
+        #     f"{self.address} got successor {self.successor} and predecessor {self.predecessor} and own key {self.key}")
+
+    def locate_storage(self, key, store_value, value=None):
+        hashed_key = self.hash_value(key.encode())
+        status = 404
+        if store_value:
+            method = "PUT"
+        else:
+            method = "GET"
+        print(method, value, key, self.key, hashed_key)
+
+        if hashed_key < self.key:
+            if (hashed_key >= self.predecessor[0]) or (self.predecessor[0] > self.key):
+                if store_value:
+                    self.object_store[hashed_key] = value
+                    print("value")
+                    status = 200
+                else:
+                    if hashed_key in self.object_store:
+                        value = self.object_store[hashed_key]
+                        status = 200
+
+            else:
+                resp, headers = self.request(
+                    method, self.predecessor[1], f"/storage/{key}", value)
+                status = resp.status
+                if status == 200 and (not store_value):
+                    value = resp.read()
+        else:
+            if self.predecessor[0] > self.key and self.predecessor[0] < hashed_key:
+                if store_value:
+                    self.object_store[hashed_key] = value
+                    status = 200
+                else:
+                    if hashed_key in self.object_store:
+                        status = 200
+                        value = self.object_store[hashed_key]
+            else:
+                resp, headers = self.request(
+                    method, self.successor[1], f"/storage/{key}", value)
+                status = resp.status
+                if status == 200 and (not value):
+                    value = resp.read()
+        if store_value:
+            return status
+        return status, value
+
+    def store_value(self, key, value):
+        hashed_key = self.hash_value(key.encode())
+        status = 200
+        if hashed_key < self.key:
+            if (hashed_key >= self.predecessor[0]) or (self.predecessor[0] > self.key):
+                self.object_store[hashed_key] = value
+            else:
+                resp, headers = self.request(
+                    "PUT", self.predecessor[1], f"/storage/{key}", value)
+                status = resp.status
+        else:
+            if self.predecessor[0] > self.key and self.predecessor[0] < hashed_key:
+                self.object_store[hashed_key] = value
+            else:
+                resp, headers = self.request(
+                    "PUT", self.successor[1], f"/storage/{key}", value)
+                status = resp.status
+        return status
+
+    def get_value(self, key):
+        hashed_key = self.hash_value(key.encode())
+        status = 404
+        value = None
+
+        if hashed_key < self.key:
+            if (hashed_key >= self.predecessor[0]) or (self.predecessor[0] > self.key):
+                if hashed_key in self.object_store:
+                    status = 200
+                    value = self.object_store[hashed_key]
+            else:
+                resp, headers = self.request(
+                    "GET", self.predecessor[1], f"/storage/{key}")
+                status = resp.status
+                if status == 200:
+                    value = resp.read()
+        else:
+            if self.predecessor[0] > self.key and self.predecessor[0] < hashed_key:
+                if hashed_key in self.object_store:
+                    status = 200
+                    value = self.object_store[hashed_key]
+            else:
+                resp, headers = self.request(
+                    "GET", self.successor[1], f"/storage/{key}")
+                status = resp.status
+                if status == 200:
+                    value = resp.read()
+        return status, value
 
     def update_neighbors(self, new_node):
         key = self.hash_value(new_node)
         new_node = new_node.decode()
 
-        if self.key < key:
-            if (key > self.predecessor[0]) or (self.predecessor[0] > self.key):
-                self.predecessor = (key, new_node)
-        elif self.key > key:
-            if (key < self.successor[0]) or (self.successor[0] < self.key):
-                self.successor = (key, new_node)
-        else:
-            return - 1
+        if key < self.key:
+            # if (key > self.predecessor[0]) or (self.predecessor[0] > self.key):
+            self.predecessor = (key, new_node)
+        elif key > self.key:
+            # if (key < self.successor[0]) or (self.successor[0] < self.key):
+            self.successor = (key, new_node)
 
         return 200
 
-    def request(self, method, client, path, value=None):
+    def update_n(self, neighbors):
+        if successor := neighbors.get("successor"):
+            self.successor = successor
+        if predecessor := neighbors.get("predecessor"):
+            self.predecessor = predecessor
+        return 200
+
+    def request(self, method, client, path, value=None, get_response=True):
         conn = http.client.HTTPConnection(client)
         conn.request(method, path, value)
-        resp = conn.getresponse()
-        headers = resp.getheaders()
+        if get_response:
+            resp = conn.getresponse()
+            headers = resp.getheaders()
+            conn.close()
+            return resp, headers
         conn.close()
-        return resp, headers
 
     def join_ring(self, node):
         resp, headers = self.request(
@@ -140,7 +241,6 @@ class ThreadingHttpServer(HTTPServer, socketserver.ThreadingMixIn):
             print("Failed to join ring")
         else:
             value = resp.read()
-        print("\n\n\n\n\n-----------------\n\n\n\n\n")
         # contenttype = "application/json"
         # for h, hv in headers:
         #     if h == "Content-type":
@@ -149,9 +249,6 @@ class ThreadingHttpServer(HTTPServer, socketserver.ThreadingMixIn):
         #     raise NotImplementedError()
         # elif contenttype == "application/json":
         #     print(value)
-        print("------------------------------------")
-        print(value)
-        print("------------------------------------")
         neighbors = json.loads(value.decode())
         self.successor = neighbors["successor"]
         self.predecessor = neighbors["predecessor"]
@@ -176,7 +273,7 @@ class ThreadingHttpServer(HTTPServer, socketserver.ThreadingMixIn):
                 neighbors["successor"] = (self.key, self.address)
                 neighbors["predecessor"] = self.predecessor
                 self.request(
-                    "PUT", self.predecessor[1], "/update", new_node)
+                    "PUT", self.predecessor[1], "/update", json.dumps({"successor": (key, new_node)}, indent=2), False)
                 self.predecessor = (key, new_node)
                 neighbors = json.dumps(neighbors, indent=2)
                 status = 200
@@ -189,7 +286,6 @@ class ThreadingHttpServer(HTTPServer, socketserver.ThreadingMixIn):
                     print("Failed to find neighbors")
                 else:
                     value = resp.read()
-                print("\n\n\n\n\n\n self.successor > key < self.key \n\n\n\n\n\n")
                 # contenttype = "application/json"
                 # for h, hv in headers:
                 #     if h == "Content-type":
@@ -206,7 +302,7 @@ class ThreadingHttpServer(HTTPServer, socketserver.ThreadingMixIn):
                 neighbors["successor"] = self.successor
                 neighbors["predecessor"] = (self.key, self.address)
                 self.request(
-                    "PUT", self.successor[1], "/update", new_node)
+                    "PUT", self.successor[1], "/update", json.dumps({"predecessor": (key, new_node)}, indent=2), False)
                 self.successor = (key, new_node)
                 neighbors = json.dumps(neighbors, indent=2)
                 status = 200
@@ -219,7 +315,6 @@ class ThreadingHttpServer(HTTPServer, socketserver.ThreadingMixIn):
                     print("Failed to find neighbors")
                 else:
                     value = resp.read()
-                print("\n\n\n\n\n\n self.successor < key > self.key \n\n\n\n\n\n")
                 # contenttype = "application/json"
                 # for h, hv in headers:
                 #     if h == "Content-type":
