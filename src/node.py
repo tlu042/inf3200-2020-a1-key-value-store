@@ -12,7 +12,6 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 class NodeHttpHandler(BaseHTTPRequestHandler):
     def send_whole_response(self, code, content, content_type="text/plain"):
-
         if isinstance(content, str):
             content = content.encode("utf-8")
             if not content_type:
@@ -43,7 +42,7 @@ class NodeHttpHandler(BaseHTTPRequestHandler):
 
         if self.path.startswith("/storage"):
             key = self.extract_key_from_path(self.path)
-            status = self.server.locate_storage(key, 1, value)
+            status = self.server.store_value(key, value)
             print(status)
             if status == 200:
                 msg = f"Value stored for {key}"
@@ -57,16 +56,13 @@ class NodeHttpHandler(BaseHTTPRequestHandler):
 
         elif self.path.startswith("/update"):
             neighbors = json.loads(value.decode())
-            status = self.server.update_n(neighbors)
-
-            # status = self.server.update_neighbors(value)
-            # self.send_whole_response(200, "Updated")
+            self.server.update_neighbors(neighbors)
 
     def do_GET(self):
         if self.path.startswith("/storage"):
             key = self.extract_key_from_path(self.path)
 
-            status, value = self.server.locate_storage(key, 0)
+            status, value = self.server.get_value(key)
             self.send_whole_response(status, value)
 
         elif self.path.startswith("/neighbors"):
@@ -98,7 +94,7 @@ class NodeHttpHandler(BaseHTTPRequestHandler):
         return value
 
 
-class ThreadingHttpServer(HTTPServer, socketserver.ThreadingMixIn):
+class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
     def __init__(self, *args, entry_node=None):
         super().__init__(*args)
         self.address = f"{self.server_address[0]}:{self.server_address[1]}"
@@ -108,53 +104,6 @@ class ThreadingHttpServer(HTTPServer, socketserver.ThreadingMixIn):
         self.predecessor = None
         if entry_node:
             self.join_ring(entry_node)
-        # print(
-        #     f"{self.address} got successor {self.successor} and predecessor {self.predecessor} and own key {self.key}")
-
-    def locate_storage(self, key, store_value, value=None):
-        hashed_key = self.hash_value(key.encode())
-        status = 404
-        if store_value:
-            method = "PUT"
-        else:
-            method = "GET"
-        print(method, value, key, self.key, hashed_key)
-
-        if hashed_key < self.key:
-            if (hashed_key >= self.predecessor[0]) or (self.predecessor[0] > self.key):
-                if store_value:
-                    self.object_store[hashed_key] = value
-                    print("value")
-                    status = 200
-                else:
-                    if hashed_key in self.object_store:
-                        value = self.object_store[hashed_key]
-                        status = 200
-
-            else:
-                resp, headers = self.request(
-                    method, self.predecessor[1], f"/storage/{key}", value)
-                status = resp.status
-                if status == 200 and (not store_value):
-                    value = resp.read()
-        else:
-            if self.predecessor[0] > self.key and self.predecessor[0] < hashed_key:
-                if store_value:
-                    self.object_store[hashed_key] = value
-                    status = 200
-                else:
-                    if hashed_key in self.object_store:
-                        status = 200
-                        value = self.object_store[hashed_key]
-            else:
-                resp, headers = self.request(
-                    method, self.successor[1], f"/storage/{key}", value)
-                status = resp.status
-                if status == 200 and (not value):
-                    value = resp.read()
-        if store_value:
-            return status
-        return status, value
 
     def store_value(self, key, value):
         hashed_key = self.hash_value(key.encode())
@@ -204,25 +153,11 @@ class ThreadingHttpServer(HTTPServer, socketserver.ThreadingMixIn):
                     value = resp.read()
         return status, value
 
-    def update_neighbors(self, new_node):
-        key = self.hash_value(new_node)
-        new_node = new_node.decode()
-
-        if key < self.key:
-            # if (key > self.predecessor[0]) or (self.predecessor[0] > self.key):
-            self.predecessor = (key, new_node)
-        elif key > self.key:
-            # if (key < self.successor[0]) or (self.successor[0] < self.key):
-            self.successor = (key, new_node)
-
-        return 200
-
-    def update_n(self, neighbors):
+    def update_neighbors(self, neighbors):
         if successor := neighbors.get("successor"):
             self.successor = successor
         if predecessor := neighbors.get("predecessor"):
             self.predecessor = predecessor
-        return 200
 
     def request(self, method, client, path, value=None, get_response=True):
         conn = http.client.HTTPConnection(client)
@@ -296,7 +231,6 @@ class ThreadingHttpServer(HTTPServer, socketserver.ThreadingMixIn):
                 #     neighbors = value
                 neighbors = value
 
-        # key > self.key
         else:
             if (key < self.successor[0]) or (self.successor[0] < self.key):
                 neighbors["successor"] = self.successor
