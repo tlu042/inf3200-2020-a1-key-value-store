@@ -3,7 +3,7 @@ if [[ -z "$1" ]]; then
 	exit
 fi
 
-port={$2:-36075}
+port=${2:-36075}
 
 computers=($(/share/apps/ifi/available-nodes.sh | grep compute | shuf | head -n $1))
 
