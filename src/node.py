@@ -97,7 +97,7 @@ class NodeHttpHandler(BaseHTTPRequestHandler):
 class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
     def __init__(self, *args, entry_node=None):
         super().__init__(*args)
-        self.address = f"{self.server_address[0]}:{self.server_address[1]}"
+        self.address = f"{self.server_name}:{self.server_port}"
         self.key = self.hash_value(self.address.encode())
         self.object_store = {}
         self.successor = None
