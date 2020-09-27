@@ -67,7 +67,7 @@ class NodeHttpHandler(BaseHTTPRequestHandler):
         elif self.path.startswith("/neighbors"):
             if not (self.server.predecessor and self.server.successor):
                 self.send_whole_response(
-                    200, (self.server.successor, self.server.predecessor))
+                    200, [])
                 return
 
             self.send_whole_response(
