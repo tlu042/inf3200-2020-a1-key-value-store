@@ -89,6 +89,7 @@ def simple_check(nodes, tries):
 
     successes = 0
     node_index = 0
+    t1 = time.time()
     for key, value in pairs.items():
         try:
             put_value(nodes[node_index], key, value)
@@ -100,10 +101,11 @@ def simple_check(nodes, tries):
             pass
 
         node_index = (node_index+1) % len(nodes)
-
+    t2 = time.time()
     success_percent = float(successes) / float(tries) * 100
     print("Stored and retrieved %d pairs of %d (%.1f%%)" % (
         successes, tries, success_percent))
+    return t2-t1
 
 
 def retrieve_from_different_nodes(nodes, tries):
@@ -112,6 +114,7 @@ def retrieve_from_different_nodes(nodes, tries):
     pairs = generate_pairs(tries)
 
     successes = 0
+    t1 = time.time()
     for key, value in pairs.items():
         try:
             put_value(random.choice(nodes), key, value)
@@ -121,11 +124,11 @@ def retrieve_from_different_nodes(nodes, tries):
                 successes += 1
         except:
             pass
-
+    t2 = time.time()
     success_percent = float(successes) / float(tries) * 100
     print("Stored and retrieved %d pairs of %d (%.1f%%)" % (
         successes, tries, success_percent))
-
+    return t2-t1
 
 def get_nonexistent_key(nodes):
     print("Retrieving a nonexistent key ...")
@@ -156,19 +159,17 @@ def main(args):
     if len(nodes) == 0:
         raise RuntimeError("No nodes registered to connect to")
 
-    t1 = time.time()
+    
     print()
-    simple_check(nodes, args.tries)
+    t = simple_check(nodes, args.tries)
 
     print()
-    retrieve_from_different_nodes(nodes, args.tries)
-    t2 = time.time()
+    t += retrieve_from_different_nodes(nodes, args.tries)
     print()
     get_nonexistent_key(nodes)
 
-    time_taken = t2 - t1
     with open("data.csv", "a") as file:
-        file.write(f"{args.n_nodes},{args.tries},{time_taken}")
+        file.write(f"{args.n_nodes},{args.tries*4},{t}")
 
 
 if __name__ == "__main__":
