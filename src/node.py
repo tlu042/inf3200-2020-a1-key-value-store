@@ -108,7 +108,10 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
     def store_value(self, key, value):
         hashed_key = self.hash_value(key.encode())
         status = 200
-        if hashed_key < self.key:
+        if not (self.predecessor and self.successor):
+           self.object_store[hashed_key] = value
+
+        elif hashed_key < self.key:
             if (hashed_key >= self.predecessor[0]) or (self.predecessor[0] > self.key):
                 self.object_store[hashed_key] = value
             else:
@@ -128,8 +131,12 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
         hashed_key = self.hash_value(key.encode())
         status = 404
         value = None
+        if not (self.predecessor and self.successor):
+           if hashed_key in self.object_store:
+               status = 200
+               value = self.object_store[hashed_key]
 
-        if hashed_key < self.key:
+        elif hashed_key < self.key:
             if (hashed_key >= self.predecessor[0]) or (self.predecessor[0] > self.key):
                 if hashed_key in self.object_store:
                     status = 200
