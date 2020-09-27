@@ -43,7 +43,6 @@ class NodeHttpHandler(BaseHTTPRequestHandler):
         if self.path.startswith("/storage"):
             key = self.extract_key_from_path(self.path)
             status = self.server.store_value(key, value)
-            print(status)
             if status == 200:
                 msg = f"Value stored for {key}"
             else:
@@ -66,6 +65,11 @@ class NodeHttpHandler(BaseHTTPRequestHandler):
             self.send_whole_response(status, value)
 
         elif self.path.startswith("/neighbors"):
+            if not (self.server.predecessor and self.server.successor):
+                self.send_whole_response(
+                    200, (self.server.successor, self.server.predecessor))
+                return
+
             self.send_whole_response(
                 200, (self.server.successor[1], self.server.predecessor[1]))
 
