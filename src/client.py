@@ -73,7 +73,7 @@ def walk_neighbours(start_nodes):
 def simple_check(nodes):
     print("Simple put/get check, retreiving from same node ...")
 
-    tries = 10
+    tries = 1000
     pairs = generate_pairs(tries)
 
     successes = 0
@@ -98,7 +98,7 @@ def simple_check(nodes):
 def retrieve_from_different_nodes(nodes):
     print("Retrieving from different nodes ...")
 
-    tries = 10
+    tries = 1000
     pairs = generate_pairs(tries)
 
     successes = 0
