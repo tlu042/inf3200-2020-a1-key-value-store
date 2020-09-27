@@ -168,7 +168,7 @@ def main(args):
     print()
     get_nonexistent_key(nodes)
 
-    transactions = arg.tries * 4
+    transactions = args.tries * 4
     with open("data.csv", "a") as file:
         file.write(f"{args.n_nodes},{transactions},{t},{transactions/t}\n")
 
