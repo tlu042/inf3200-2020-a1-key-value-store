@@ -76,27 +76,6 @@ class NodeHttpHandler(BaseHTTPRequestHandler):
         else:
             self.send_whole_response(404, "Unknown path: " + self.path)
 
-    def ask_neighbor(self, key):
-        neighbor = self.server.successor[1]
-        # print(neighbor)
-        conn = http.client.HTTPConnection(self.server.successor[1].decode())
-        conn.request("GET", "/storage/" + key)
-        resp = conn.getresponse()
-        headers = resp.getheaders()
-        if resp.status != 200:
-            value = None
-        else:
-            value = resp.read()
-        contenttype = "text/plain"
-        for h, hv in headers:
-            if h == "Content-type":
-                contenttype = hv
-        if contenttype == "text/plain":
-            value = value.decode("utf-8")
-        conn.close()
-
-        return value
-
 
 class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
     def __init__(self, *args, entry_node=None):
@@ -112,19 +91,29 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
     def store_value(self, key, value):
         hashed_key = self.hash_value(key.encode())
         status = 200
+
+        # If the network consists of a single node, store the value.
         if not (self.predecessor and self.successor):
-           self.object_store[hashed_key] = value
+            self.object_store[hashed_key] = value
 
         elif hashed_key < self.key:
+            # If the key of the data is less than this nodes key and
+            # greater or equal to the predecessors key, store the value.
             if (hashed_key >= self.predecessor[0]) or (self.predecessor[0] > self.key):
                 self.object_store[hashed_key] = value
+            # Else, reroute the request to the predecessor.
             else:
                 resp, headers = self.request(
                     "PUT", self.predecessor[1], f"/storage/{key}", value)
                 status = resp.status
+        
         else:
+            # If we are located on the node with the smallest key and the
+            # key to store is greater than the node with the biggest key,
+            # store it on this node.
             if self.predecessor[0] > self.key and self.predecessor[0] < hashed_key:
                 self.object_store[hashed_key] = value
+            # Else, reroute the request to the successor
             else:
                 resp, headers = self.request(
                     "PUT", self.successor[1], f"/storage/{key}", value)
@@ -135,16 +124,20 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
         hashed_key = self.hash_value(key.encode())
         status = 404
         value = None
+        # If the network consists of a single node, store the value.
         if not (self.predecessor and self.successor):
-           if hashed_key in self.object_store:
-               status = 200
-               value = self.object_store[hashed_key]
+            if hashed_key in self.object_store:
+                status = 200
+                value = self.object_store[hashed_key]
 
         elif hashed_key < self.key:
+            # If the key of the data is less than this nodes key and
+            # greater or equal to the predecessors key, retrieve the value.
             if (hashed_key >= self.predecessor[0]) or (self.predecessor[0] > self.key):
                 if hashed_key in self.object_store:
                     status = 200
                     value = self.object_store[hashed_key]
+            # Else, reroute the request to the predecessor.
             else:
                 resp, headers = self.request(
                     "GET", self.predecessor[1], f"/storage/{key}")
@@ -152,10 +145,14 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
                 if status == 200:
                     value = resp.read()
         else:
+            # If we are located on the node with the smallest key and the
+            # key to store is greater than the node with the biggest key,
+            # retrieve it from this node.
             if self.predecessor[0] > self.key and self.predecessor[0] < hashed_key:
                 if hashed_key in self.object_store:
                     status = 200
                     value = self.object_store[hashed_key]
+            # Else, reroute the request to the successor
             else:
                 resp, headers = self.request(
                     "GET", self.successor[1], f"/storage/{key}")
@@ -187,14 +184,6 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
             print("Failed to join ring")
         else:
             value = resp.read()
-        # contenttype = "application/json"
-        # for h, hv in headers:
-        #     if h == "Content-type":
-        #         contenttype = hv
-        # if contenttype == "text/plain":
-        #     raise NotImplementedError()
-        # elif contenttype == "application/json":
-        #     print(value)
         neighbors = json.loads(value.decode())
         self.successor = neighbors["successor"]
         self.predecessor = neighbors["predecessor"]
@@ -205,7 +194,7 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
         key = self.hash_value(new_node)
         new_node = new_node.decode()
 
-        # If single node
+        # If network consists of a single node
         if not (self.successor or self.predecessor):
             self.successor = (key, new_node)
             self.predecessor = (key, new_node)
@@ -214,16 +203,23 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
             neighbors = json.dumps(neighbors, indent=2)
             return status, neighbors
 
+        # If the key of the joining node is less than this node...
         if key < self.key:
+            # ...and the key is greater than the predecessor,
+            # or we are in the wrap-around point of the node ring,
+            # put the joining node at this position.
             if (key > self.predecessor[0]) or (self.predecessor[0] > self.key):
                 neighbors["successor"] = (self.key, self.address)
                 neighbors["predecessor"] = self.predecessor
+                # send a request to the predecessor to update its successor
+                # to the joining node.
                 self.request(
                     "PUT", self.predecessor[1], "/update", json.dumps({"successor": (key, new_node)}, indent=2), False)
                 self.predecessor = (key, new_node)
                 neighbors = json.dumps(neighbors, indent=2)
                 status = 200
-
+            # ...but not greater than the predecessor, we reroute the request
+            # to the predecessor.
             else:
                 resp, headers = self.request(
                     "PUT", self.predecessor[1], "/join", new_node)
@@ -232,26 +228,24 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
                     print("Failed to find neighbors")
                 else:
                     value = resp.read()
-                # contenttype = "application/json"
-                # for h, hv in headers:
-                #     if h == "Content-type":
-                #         contenttype = hv
-                # if contenttype == "text/plain":
-                #     raise NotImplementedError()
-                # elif contenttype == "application/json":
-                #     neighbors = value
                 neighbors = value
-
+        # If the key of the joining node is greater or equal to this node...
         else:
+            # ...and the key is less than the successor, or we are in the
+            # wrap-around point of the node ring, put the joining node
+            # at this position.
             if (key < self.successor[0]) or (self.successor[0] < self.key):
                 neighbors["successor"] = self.successor
                 neighbors["predecessor"] = (self.key, self.address)
+                # send a request to the successor to update its predecessor
+                # to the joining node.
                 self.request(
                     "PUT", self.successor[1], "/update", json.dumps({"predecessor": (key, new_node)}, indent=2), False)
                 self.successor = (key, new_node)
                 neighbors = json.dumps(neighbors, indent=2)
                 status = 200
-
+            # ...but not less than the successor, we reroute the request
+            # to the successor.
             else:
                 resp, headers = self.request(
                     "PUT", self.successor[1], "/join", new_node)
@@ -260,16 +254,8 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
                     print("Failed to find neighbors")
                 else:
                     value = resp.read()
-                # contenttype = "application/json"
-                # for h, hv in headers:
-                #     if h == "Content-type":
-                #         contenttype = hv
-                # if contenttype == "text/plain":
-                #     raise NotImplementedError()
-                # elif contenttype == "application/json":
-                #     neighbors = value
                 neighbors = value
-
+        # return the found neighbors to the joining node.
         return status, neighbors
 
     def hash_value(self, value):
