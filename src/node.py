@@ -58,20 +58,56 @@ class NodeHttpHandler(BaseHTTPRequestHandler):
             self.server.update_neighbors(neighbors)
 
     def do_GET(self):
-        if self.path.startswith("/storage"):
+        if self.path.startswith("/node-info"):
+            response = {
+                "node_key": self.server.key,
+                "successor": self.server.successor[1],
+                "others": [self.server.predecessor[1]],
+                "sim-crash": self.server.sim_crash
+            }
+            self.send_whole_response(200, response, content_type="application/json")
+
+        elif self.server.sim_crash is True:
+            self.send_whole_response(500, "I have sim-crashed")
+
+        elif self.path.startswith("/storage"):
             key = self.extract_key_from_path(self.path)
 
             status, value = self.server.get_value(key)
             self.send_whole_response(status, value)
 
         elif self.path.startswith("/neighbors"):
-            if not (self.server.predecessor and self.server.successor):
+            if self.server.successor[1] == self.server.address:
                 self.send_whole_response(
                     200, [])
                 return
 
             self.send_whole_response(
                 200, (self.server.successor[1], self.server.predecessor[1]))
+
+        else:
+            self.send_whole_response(404, "Unknown path: " + self.path)
+
+    def do_POST(self):
+        if self.path == "/sim-recover":
+            self.server.sim_recover()
+            self.send_whole_response(200, "Recovering from crash...")
+
+        elif self.path == "/sim-crash":
+            self.server.sim_crash()
+            self.send_whole_response(200, "Simulating crash...")
+
+        elif self.server.sim_crash is True:
+            self.send_whole_response(500, "I have sim-crashed")
+
+        elif self.path == "/leave":
+            self.server.leave()
+            self.send_whole_response(200, "Leaving network...")
+
+        elif self.path.startswith("/join"):
+            nprime = re.sub(r'^/join\?nprime=([\w:-]+)$', r'\1', self.path)
+            self.server.join_ring(nprime)
+            self.send_whole_response(200, "Joining network...")
 
         else:
             self.send_whole_response(404, "Unknown path: " + self.path)
@@ -83,8 +119,9 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
         self.address = f"{self.server_name}:{self.server_port}"
         self.key = self.hash_value(self.address.encode())
         self.object_store = {}
-        self.successor = None
-        self.predecessor = None
+        self.successor = (self.key, self.address)
+        self.predecessor = (self.key, self.address)
+        self.sim_crash = False
         if entry_node:
             self.join_ring(entry_node)
 
@@ -93,7 +130,7 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
         status = 200
 
         # If the network consists of a single node, store the value.
-        if not (self.predecessor and self.successor):
+        if self.successor[1] == self.address:
             self.object_store[hashed_key] = value
 
         elif hashed_key < self.key:
@@ -125,7 +162,7 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
         status = 404
         value = None
         # If the network consists of a single node, store the value.
-        if not (self.predecessor and self.successor):
+        if self.successor[1] == self.address:
             if hashed_key in self.object_store:
                 status = 200
                 value = self.object_store[hashed_key]
@@ -188,6 +225,24 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
         self.successor = neighbors["successor"]
         self.predecessor = neighbors["predecessor"]
 
+    def leave(self):
+        self.request(
+            "PUT",
+            self.predecessor[1],
+            "/update",
+            json.dumps({"successor": self.successor}, indent=2),
+            False
+        )
+        self.request(
+            "PUT",
+            self.successor[1],
+            "/update",
+            json.dumps({"predecessor": self.predecessor}, indent=2),
+            False
+        )
+        self.successor = (self.key, self.address)
+        self.predecessor = (self.key, self.address)
+
     def find_neighbors(self, new_node):
         neighbors = {}
         status = 200
@@ -195,7 +250,7 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
         new_node = new_node.decode()
 
         # If network consists of a single node
-        if not (self.successor or self.predecessor):
+        if self.successor[1] == self.address:
             self.successor = (key, new_node)
             self.predecessor = (key, new_node)
             neighbors["predecessor"] = (self.key, self.address)
@@ -262,6 +317,9 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
         m = sha1()
         m.update(value)
         return m.hexdigest()
+
+    def sim_crash(self):
+        self.sim_crash = True
 
 
 def arg_parser():
