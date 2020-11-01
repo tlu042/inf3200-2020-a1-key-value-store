@@ -49,13 +49,13 @@ class NodeHttpHandler(BaseHTTPRequestHandler):
                 msg = f"Failed to store value for {key}"
             self.send_whole_response(status, msg)
 
-        elif self.path.startswith("/join"):
-            status, neighbors = self.server.find_neighbors(value)
-            self.send_whole_response(status, neighbors)
-
         elif self.path.startswith("/update"):
             neighbors = json.loads(value.decode())
             self.server.update_neighbors(neighbors)
+
+        elif self.path.startswith("/join"):
+            status, neighbors = self.server.find_neighbors(value)
+            self.send_whole_response(status, neighbors)
 
     def do_GET(self):
         if self.path.startswith("/node-info"):
@@ -63,11 +63,11 @@ class NodeHttpHandler(BaseHTTPRequestHandler):
                 "node_key": self.server.key,
                 "successor": self.server.successor[1],
                 "others": [self.server.predecessor[1]],
-                "sim-crash": self.server.sim_crash
+                "sim-crash": self.server.sim_crashed
             }
             self.send_whole_response(200, response, content_type="application/json")
 
-        elif self.server.sim_crash is True:
+        elif self.server.sim_crashed is True:
             self.send_whole_response(500, "I have sim-crashed")
 
         elif self.path.startswith("/storage"):
@@ -97,7 +97,7 @@ class NodeHttpHandler(BaseHTTPRequestHandler):
             self.server.sim_crash()
             self.send_whole_response(200, "Simulating crash...")
 
-        elif self.server.sim_crash is True:
+        elif self.server.sim_crashed is True:
             self.send_whole_response(500, "I have sim-crashed")
 
         elif self.path == "/leave":
@@ -106,8 +106,8 @@ class NodeHttpHandler(BaseHTTPRequestHandler):
 
         elif self.path.startswith("/join"):
             nprime = re.sub(r'^/join\?nprime=([\w:-]+)$', r'\1', self.path)
-            self.server.join_ring(nprime)
-            self.send_whole_response(200, "Joining network...")
+            status, neighbors = self.server.join_ring(nprime)
+            self.send_whole_response(status, neighbors)
 
         else:
             self.send_whole_response(404, "Unknown path: " + self.path)
@@ -121,11 +121,32 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
         self.object_store = {}
         self.successor = (self.key, self.address)
         self.predecessor = (self.key, self.address)
-        self.sim_crash = False
+        self.sim_crashed = False
         if entry_node:
             self.join_ring(entry_node)
 
+    def stabilize(self, node, direction):
+        # Direction
+        # 0: successor
+        # 1: predecessor
+        if direction == 0:
+            resp, headers = self.request("POST", self.successor[1], "/stabilize", direction)
+        else:
+            resp, headers = self.request("POST", self.predecessor[1], "/stabilize", direction)
+        
+        # Timeout
+        if resp.status == 500:
+            return self.address
+
+        elif resp.status != 200:
+            print("Failed to stabilize")
+        else:
+            value = resp.read()
+        print("Value:", value)
+
     def store_value(self, key, value):
+        if self.sim_crashed:
+            return 500, ""
         hashed_key = self.hash_value(key.encode())
         status = 200
 
@@ -158,6 +179,9 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
         return status
 
     def get_value(self, key):
+        if self.sim_crashed:
+            return 500, ""
+
         hashed_key = self.hash_value(key.encode())
         status = 404
         value = None
@@ -219,11 +243,13 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
             "PUT", node, "/join", self.address)
         if resp.status != 200:
             print("Failed to join ring")
+            return resp.status, ""
         else:
             value = resp.read()
         neighbors = json.loads(value.decode())
         self.successor = neighbors["successor"]
         self.predecessor = neighbors["predecessor"]
+        return resp.status, neighbors
 
     def leave(self):
         self.request(
@@ -244,6 +270,8 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
         self.predecessor = (self.key, self.address)
 
     def find_neighbors(self, new_node):
+        if self.sim_crashed:
+            return 500, ""
         neighbors = {}
         status = 200
         key = self.hash_value(new_node)
@@ -277,7 +305,7 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
             # to the predecessor.
             else:
                 resp, headers = self.request(
-                    "PUT", self.predecessor[1], "/join", new_node)
+                    "POST", self.predecessor[1], f"/join?nprime={new_node}")
                 status = resp.status
                 if resp.status != 200:
                     print("Failed to find neighbors")
@@ -303,7 +331,7 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
             # to the successor.
             else:
                 resp, headers = self.request(
-                    "PUT", self.successor[1], "/join", new_node)
+                    "POST", self.successor[1], f"/join?nprime={new_node}")
                 status = resp.status
                 if resp.status != 200:
                     print("Failed to find neighbors")
@@ -319,7 +347,11 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
         return m.hexdigest()
 
     def sim_crash(self):
-        self.sim_crash = True
+        self.sim_crashed = True
+
+    def sim_recover(self):
+        self.sim_crashed = False
+        self.find_neighbors()
 
 
 def arg_parser():
