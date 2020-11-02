@@ -40,7 +40,10 @@ class NodeHttpHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get('content-length', 0))
         value = self.rfile.read(content_length)
 
-        if self.path.startswith("/storage"):
+        if self.server.sim_crashed is True:
+            self.send_whole_response(500, "I have sim-crashed")
+
+        elif self.path.startswith("/storage"):
             key = self.extract_key_from_path(self.path)
             status = self.server.store_value(key, value)
             if status == 200:
@@ -57,18 +60,26 @@ class NodeHttpHandler(BaseHTTPRequestHandler):
             status, neighbors = self.server.find_neighbors(value)
             self.send_whole_response(status, neighbors)
 
+        elif self.path.startswith("/stabilize"):
+            info = json.loads(value.decode())
+            node = self.server.stabilize(info)
+            self.send_whole_response(200, json.dumps({"key": node[0], "address": node[1]}))
+
     def do_GET(self):
         if self.path.startswith("/node-info"):
             response = {
                 "node_key": self.server.key,
                 "successor": self.server.successor[1],
                 "others": [self.server.predecessor[1]],
-                "sim-crash": self.server.sim_crashed
+                "sim_crash": self.server.sim_crashed
             }
             self.send_whole_response(200, response, content_type="application/json")
 
         elif self.server.sim_crashed is True:
             self.send_whole_response(500, "I have sim-crashed")
+
+        elif self.path.startswith("/key"):
+            self.send_whole_response(200, self.server.key)
 
         elif self.path.startswith("/storage"):
             key = self.extract_key_from_path(self.path)
@@ -125,24 +136,24 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
         if entry_node:
             self.join_ring(entry_node)
 
-    def stabilize(self, node, direction):
+    def stabilize(self, info):
         # Direction
         # 0: successor
         # 1: predecessor
-        if direction == 0:
-            resp, headers = self.request("POST", self.successor[1], "/stabilize", direction)
+        if info["direction"] == 0:
+            resp, headers = self.request("PUT", self.successor[1], "/stabilize", json.dumps(info))
+            # Timeout
+            if resp.status == 500:
+                self.successor = info["node"]
+                return (self.key, self.address)
         else:
-            resp, headers = self.request("POST", self.predecessor[1], "/stabilize", direction)
-        
-        # Timeout
-        if resp.status == 500:
-            return self.address
-
-        elif resp.status != 200:
-            print("Failed to stabilize")
-        else:
-            value = resp.read()
-        print("Value:", value)
+            resp, headers = self.request("PUT", self.predecessor[1], "/stabilize", json.dumps(info))
+            # Timeout
+            if resp.status == 500:
+                self.predecessor = info["node"]
+                return (self.key, self.address)
+        info = json.loads(resp.read())
+        return (info["key"], info["address"])
 
     def store_value(self, key, value):
         if self.sim_crashed:
@@ -161,7 +172,7 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
                 self.object_store[hashed_key] = value
             # Else, reroute the request to the predecessor.
             else:
-                resp, headers = self.request(
+                resp, headers = self.try_request(
                     "PUT", self.predecessor[1], f"/storage/{key}", value)
                 status = resp.status
         
@@ -173,7 +184,7 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
                 self.object_store[hashed_key] = value
             # Else, reroute the request to the successor
             else:
-                resp, headers = self.request(
+                resp, headers = self.try_request(
                     "PUT", self.successor[1], f"/storage/{key}", value)
                 status = resp.status
         return status
@@ -200,7 +211,7 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
                     value = self.object_store[hashed_key]
             # Else, reroute the request to the predecessor.
             else:
-                resp, headers = self.request(
+                resp, headers = self.try_request(
                     "GET", self.predecessor[1], f"/storage/{key}")
                 status = resp.status
                 if status == 200:
@@ -215,7 +226,7 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
                     value = self.object_store[hashed_key]
             # Else, reroute the request to the successor
             else:
-                resp, headers = self.request(
+                resp, headers = self.try_request(
                     "GET", self.successor[1], f"/storage/{key}")
                 status = resp.status
                 if status == 200:
@@ -229,6 +240,8 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
             self.predecessor = predecessor
 
     def request(self, method, client, path, value=None, get_response=True):
+        if type(value) == int:
+            value = bytes(value)
         conn = http.client.HTTPConnection(client)
         conn.request(method, path, value)
         if get_response:
@@ -238,8 +251,27 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
             return resp, headers
         conn.close()
 
+    def try_request(self, method, client, path, value=None, get_response=True):
+        if get_response:
+            resp, headers = self.request(method, client, path, value, get_response)
+
+            if resp.status == 500:
+                if client == self.successor[1]:
+                    node = self.stabilize({"node": (self.key, self.address), "direction": 1})                    
+                    self.successor = node
+
+                else:
+                    node = self.stabilize({"node": (self.key, self.address), "direction": 0})
+                    self.predecessor = node
+
+                resp, headers = self.request(method, client, path, value, get_response)
+
+            return resp, headers
+        else:
+            self.request(method, client, path, value, get_response)
+
     def join_ring(self, node):
-        resp, headers = self.request(
+        resp, headers = self.try_request(
             "PUT", node, "/join", self.address)
         if resp.status != 200:
             print("Failed to join ring")
@@ -252,14 +284,14 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
         return resp.status, neighbors
 
     def leave(self):
-        self.request(
+        self.try_request(
             "PUT",
             self.predecessor[1],
             "/update",
             json.dumps({"successor": self.successor}, indent=2),
             False
         )
-        self.request(
+        self.try_request(
             "PUT",
             self.successor[1],
             "/update",
@@ -296,7 +328,7 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
                 neighbors["predecessor"] = self.predecessor
                 # send a request to the predecessor to update its successor
                 # to the joining node.
-                self.request(
+                self.try_request(
                     "PUT", self.predecessor[1], "/update", json.dumps({"successor": (key, new_node)}, indent=2), False)
                 self.predecessor = (key, new_node)
                 neighbors = json.dumps(neighbors, indent=2)
@@ -304,8 +336,8 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
             # ...but not greater than the predecessor, we reroute the request
             # to the predecessor.
             else:
-                resp, headers = self.request(
-                    "POST", self.predecessor[1], f"/join?nprime={new_node}")
+                resp, headers = self.try_request(
+                    "PUT", self.predecessor[1], "/join", new_node)
                 status = resp.status
                 if resp.status != 200:
                     print("Failed to find neighbors")
@@ -322,7 +354,7 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
                 neighbors["predecessor"] = (self.key, self.address)
                 # send a request to the successor to update its predecessor
                 # to the joining node.
-                self.request(
+                self.try_request(
                     "PUT", self.successor[1], "/update", json.dumps({"predecessor": (key, new_node)}, indent=2), False)
                 self.successor = (key, new_node)
                 neighbors = json.dumps(neighbors, indent=2)
@@ -330,8 +362,8 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
             # ...but not less than the successor, we reroute the request
             # to the successor.
             else:
-                resp, headers = self.request(
-                    "POST", self.successor[1], f"/join?nprime={new_node}")
+                resp, headers = self.try_request(
+                    "PUT", self.successor[1], "/join", new_node)
                 status = resp.status
                 if resp.status != 200:
                     print("Failed to find neighbors")
@@ -350,8 +382,9 @@ class ThreadingHttpServer(socketserver.ThreadingMixIn, HTTPServer):
         self.sim_crashed = True
 
     def sim_recover(self):
-        self.sim_crashed = False
-        self.find_neighbors()
+        if self.sim_crashed:
+            self.sim_crashed = False
+            self.join_ring(self.successor[1])
 
 
 def arg_parser():
